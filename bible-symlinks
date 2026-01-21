@@ -1022,11 +1022,13 @@ OPTIONS:
     -h, --help      Show this help
     -l, --list      List current symlinks and exit
     -a, --add       Quick add: create symlink (usage: -a NAME MODULE)
+    -o, --output    Write current symlink names to a file and exit
 
 EXAMPLES:
     $(basename "$0")                    # Interactive mode
     $(basename "$0") -l                 # List symlinks
     $(basename "$0") -a lxx LXX         # Quick add LXX as 'lxx'
+    $(basename "$0") -o symlinks.txt    # Export symlink list
 
 EOF
 }
@@ -1054,6 +1056,14 @@ main() {
                 die "Usage: $0 -a NAME MODULE"
             fi
             create_symlink "$2" "$3"
+            exit 0
+            ;;
+        -o|--output)
+            if [[ -z "${2:-}" ]]; then
+                die "Usage: $0 -o OUTPUT_FILE"
+            fi
+            get_existing_symlinks > "$2"
+            success "Wrote symlink list to: $2"
             exit 0
             ;;
         "")
