@@ -1,0 +1,1069 @@
+#!/bin/bash
+
+# bible-symlinks - Interactive symlink generator for Bible modules
+# Uses fzf for multi-select interface
+
+set -euo pipefail
+
+readonly SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+readonly BIBLE_SCRIPT="$SCRIPT_DIR/bible"
+trap 'chmod +x "$BIBLE_SCRIPT" 2>/dev/null || true' EXIT
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+die() {
+    echo -e "${RED}ERROR:${NC} $*" >&2
+    exit 1
+}
+
+info() {
+    echo -e "${BLUE}INFO:${NC} $*"
+}
+
+success() {
+    echo -e "${GREEN}✓${NC} $*"
+}
+
+warn() {
+    echo -e "${YELLOW}WARN:${NC} $*"
+}
+
+# ============================================================================
+# CHECK DEPENDENCIES
+# ============================================================================
+
+check_dependencies() {
+    if ! command -v fzf >/dev/null 2>&1; then
+        die "fzf is required but not installed. Install with: sudo apt install fzf"
+    fi
+
+    if ! command -v diatheke >/dev/null 2>&1; then
+        die "diatheke is required but not installed."
+    fi
+
+    if [[ ! -e "$BIBLE_SCRIPT" ]]; then
+        die "bible script not found at: $BIBLE_SCRIPT"
+    fi
+    if [[ ! -x "$BIBLE_SCRIPT" ]]; then
+        chmod +x "$BIBLE_SCRIPT" 2>/dev/null || true
+    fi
+}
+
+# ============================================================================
+# GET MODULES
+# ============================================================================
+
+get_module_sections() {
+    diatheke -b system -k modulelist 2>/dev/null \
+        | awk '/^[A-Za-z].*:$/ { print }'
+}
+
+get_modules_by_section() {
+    local section="$1"
+
+    # Section headers end with ":" (no space before), modules have " : " pattern
+    diatheke -b system -k modulelist 2>/dev/null \
+        | awk -v section="$section" '
+            BEGIN { in_section=0 }
+            $0 == section { in_section=1; next }
+            in_section && /^[A-Za-z].*:$/ { in_section=0 }
+            in_section && / : / { print }
+        ' \
+        | sort
+}
+
+get_existing_symlinks() {
+    # Get list of existing symlinks pointing to bible
+    find "$SCRIPT_DIR" -maxdepth 1 -type l -lname "bible" -printf "%f\n" 2>/dev/null | sort
+}
+
+strip_format_suffix() {
+    local name="$1"
+    local base="$name"
+
+    if [[ "$name" =~ ^(.+)(html|tex|typs|typ|org|md)$ ]]; then
+        base="${BASH_REMATCH[1]}"
+    fi
+
+    echo "$base"
+}
+
+strip_option_suffixes() {
+    local name="$1"
+    local base="$name"
+
+    if [[ "$base" == *-* ]]; then
+        echo "${base%-*}"
+        return 0
+    fi
+
+    while [[ -n "$base" ]]; do
+        local last="${base: -1}"
+        case "$last" in
+            f|r|m|n|l|h|c|v|a|p|b|w|g|e|i|x|t|M)
+                base="${base::-1}"
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+
+    echo "$base"
+}
+
+resolve_module_name() {
+    local base="$1"
+    local mapped
+
+    mapped=$(awk -v name="$base" '
+        BEGIN { in_map=0 }
+        /^declare -A MODULE_MAP=\(/ { in_map=1; next }
+        in_map && /^\)/ { exit }
+        in_map && $0 ~ "^[[:space:]]*\\[" name "\\]=" {
+            if (match($0, /\\[[^]]+\\]="([^"]+)"/, m)) {
+                print m[1]
+                exit
+            }
+        }
+    ' "$BIBLE_SCRIPT")
+
+    if [[ -n "$mapped" ]]; then
+        echo "$mapped"
+        return 0
+    fi
+
+    local conf
+    conf=$(find_module_conf "$base") || true
+    if [[ -n "$conf" ]]; then
+        echo "$base"
+        return 0
+    fi
+
+    local upper_base="${base^^}"
+    conf=$(find_module_conf "$upper_base") || true
+    if [[ -n "$conf" ]]; then
+        echo "$upper_base"
+        return 0
+    fi
+
+    if diatheke -b "$upper_base" -k "Gen 1:1" >/dev/null 2>&1; then
+        echo "$upper_base"
+        return 0
+    fi
+
+    if diatheke -b "$base" -k "Gen 1:1" >/dev/null 2>&1; then
+        echo "$base"
+        return 0
+    fi
+
+    return 1
+}
+
+resolve_module_from_symlink() {
+    local name="$1"
+    local module=""
+
+    module=$(resolve_module_name "$name") && { echo "$module"; return 0; }
+
+    local no_format
+    no_format=$(strip_format_suffix "$name")
+    if [[ "$no_format" != "$name" ]]; then
+        module=$(resolve_module_name "$no_format") && { echo "$module"; return 0; }
+    fi
+
+    local no_opts
+    no_opts=$(strip_option_suffixes "$no_format")
+    if [[ "$no_opts" != "$no_format" ]]; then
+        module=$(resolve_module_name "$no_opts") && { echo "$module"; return 0; }
+    fi
+
+    return 1
+}
+
+find_module_conf() {
+    local module="$1"
+    local paths=("$HOME/.sword/mods.d" "/usr/share/sword/mods.d")
+    local path
+
+    for path in "${paths[@]}"; do
+        if [[ -d "$path" ]]; then
+            local conf
+            conf=$(grep -rl --include='*.conf' "^\\[$module\\]\$" "$path" 2>/dev/null | grep -v 'modules-conf.cache' | head -1 || true)
+            if [[ -n "$conf" ]]; then
+                echo "$conf"
+                return 0
+            fi
+        fi
+    done
+
+    return 1
+}
+
+get_supported_option_filters() {
+    local module="$1"
+    local conf
+    local options=""
+
+    conf=$(find_module_conf "$module") || true
+    if [[ -z "$conf" ]]; then
+        echo ""
+        return 0
+    fi
+
+    if grep -q '^GlobalOptionFilter=.*OSISFootnotes' "$conf" 2>/dev/null; then
+        options+="f"
+    fi
+    if grep -q '^GlobalOptionFilter=.*OSISScripref' "$conf" 2>/dev/null; then
+        options+="r"
+    fi
+    if grep -q '^GlobalOptionFilter=.*OSISHeadings' "$conf" 2>/dev/null; then
+        options+="h"
+    fi
+    if grep -q '^GlobalOptionFilter=.*OSISRedLetterWords' "$conf" 2>/dev/null; then
+        options+="w"
+    fi
+    if grep -q '^GlobalOptionFilter=.*OSISLemma' "$conf" 2>/dev/null; then
+        options+="l"
+    fi
+    if grep -q '^GlobalOptionFilter=.*OSISStrongs' "$conf" 2>/dev/null; then
+        options+="n"
+    fi
+    if grep -q '^GlobalOptionFilter=.*OSISMorph' "$conf" 2>/dev/null; then
+        options+="m"
+    fi
+    if grep -q '^GlobalOptionFilter=.*OSISMorphSegmentation' "$conf" 2>/dev/null; then
+        options+="M"
+    fi
+    if grep -q '^GlobalOptionFilter=.*OSISGlosses' "$conf" 2>/dev/null; then
+        options+="g"
+    fi
+    if grep -q '^GlobalOptionFilter=.*OSISIntro' "$conf" 2>/dev/null; then
+        options+="i"
+    fi
+    if grep -q '^GlobalOptionFilter=.*OSISWordEnumerations' "$conf" 2>/dev/null; then
+        options+="e"
+    fi
+    if grep -q '^GlobalOptionFilter=.*UTF8HebrewPoints' "$conf" 2>/dev/null; then
+        options+="v"
+    fi
+    if grep -q '^GlobalOptionFilter=.*UTF8Cantillation' "$conf" 2>/dev/null; then
+        options+="c"
+    fi
+    if grep -q '^GlobalOptionFilter=.*UTF8GreekAccents' "$conf" 2>/dev/null; then
+        options+="a"
+    fi
+    if grep -q '^GlobalOptionFilter=.*UTF8ArabicPoints' "$conf" 2>/dev/null; then
+        options+="p"
+    fi
+
+    dedupe_option_string "$options"
+}
+
+# ============================================================================
+# FORMAT SUFFIXES
+# ============================================================================
+
+readonly FORMAT_SUFFIXES=(
+    ""      # plain
+    "html"
+    "tex"
+    "typs"
+    "typ"
+    "org"
+    "md"
+)
+
+readonly OPTION_ORDER="frmnlhcvapbwgeixtM"
+
+# ============================================================================
+# MAIN MENU
+# ============================================================================
+
+show_main_menu() {
+    echo ""
+    echo -e "${BLUE}Bible Symlink Manager${NC}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "1) Add symlinks for Bible modules"
+    echo "2) Add symlinks for other module types"
+    echo "3) Add format variants for existing modules"
+    echo "4) Add option variants for existing modules"
+    echo "5) Force option variants for existing modules"
+    echo "6) Remove symlinks"
+    echo "7) Show current symlinks"
+    echo "8) Exit"
+    echo ""
+    read -p "Choose option [1-8]: " choice
+
+    case "$choice" in
+        1) add_module_symlinks "Biblical Texts:" ;;
+        2) add_other_module_symlinks ;;
+        3) add_format_variants ;;
+        4) add_option_variants ;;
+        5) force_option_variants ;;
+        6) remove_symlinks ;;
+        7) show_current_symlinks ;;
+        8) exit 0 ;;
+        *) warn "Invalid option"; show_main_menu ;;
+    esac
+}
+
+# ============================================================================
+# ADD MODULE SYMLINKS
+# ============================================================================
+
+add_module_symlinks() {
+    local section="${1:-Biblical Texts:}"
+
+    info "Fetching available modules from section: $section"
+
+    local modules
+    modules=$(get_modules_by_section "$section")
+
+    if [[ -z "$modules" ]]; then
+        die "No modules found for section: $section"
+    fi
+
+    echo ""
+    echo -e "${YELLOW}Select modules to create symlinks for:${NC}"
+    echo -e "${BLUE}(Use TAB to select multiple, ENTER to confirm)${NC}"
+    echo ""
+
+    local selected
+    selected=$(fzf --multi \
+        --header="TAB=select, ENTER=confirm, ESC=cancel" \
+        --preview="echo 'Module: {1}'" \
+        --preview-window=up:1 \
+        --height=80% \
+        --border \
+        --prompt="Select modules > " <<< "$modules") || { echo "Cancelled."; show_main_menu; return; }
+
+    if [[ -z "$selected" ]]; then
+        warn "No modules selected"
+        show_main_menu
+        return
+    fi
+
+    echo ""
+    echo -e "${YELLOW}Enter short name for symlink (or press ENTER for default):${NC}"
+    echo ""
+
+    while IFS= read -r line; do
+        # Format is "ModuleName : Description"
+        local module_name="${line%% : *}"
+        local module_desc="${line#* : }"
+
+        # Suggest lowercase module name as default
+        local default_name="${module_name,,}"
+
+        read -p "Symlink name for $module_name [$default_name]: " custom_name < /dev/tty
+        local symlink_name="${custom_name:-$default_name}"
+
+        create_symlink "$symlink_name" "$module_name"
+
+    done <<< "$selected"
+
+    echo ""
+    success "Done creating symlinks"
+    show_main_menu
+}
+
+add_other_module_symlinks() {
+    local sections
+    sections=$(get_module_sections | grep -v '^Biblical Texts:$')
+
+    if [[ -z "$sections" ]]; then
+        die "No other module sections found"
+    fi
+
+    echo ""
+    echo -e "${YELLOW}Select module section:${NC}"
+    echo ""
+
+    local section
+    section=$(fzf \
+        --header="ENTER=confirm, ESC=cancel" \
+        --height=50% \
+        --border \
+        --prompt="Select section > " <<< "$sections") || { echo "Cancelled."; show_main_menu; return; }
+
+    if [[ -z "$section" ]]; then
+        warn "No section selected"
+        show_main_menu
+        return
+    fi
+
+    add_module_symlinks "$section"
+}
+
+# ============================================================================
+# ADD FORMAT VARIANTS
+# ============================================================================
+
+add_format_variants() {
+    local existing
+    existing=$(get_existing_symlinks)
+
+    if [[ -z "$existing" ]]; then
+        warn "No existing symlinks found. Add module symlinks first."
+        show_main_menu
+        return
+    fi
+
+    echo ""
+    echo -e "${YELLOW}Select base symlinks to add format variants for:${NC}"
+    echo ""
+
+    local selected
+    selected=$(fzf --multi \
+        --header="TAB=select, ENTER=confirm" \
+        --height=50% \
+        --border \
+        --prompt="Select bases > " <<< "$existing") || { echo "Cancelled."; show_main_menu; return; }
+
+    if [[ -z "$selected" ]]; then
+        warn "No symlinks selected"
+        show_main_menu
+        return
+    fi
+
+    echo ""
+    echo -e "${YELLOW}Select formats to add (typ=table, typs=simple):${NC}"
+    echo ""
+
+    local formats_list=""
+    local fmt
+    for fmt in "${FORMAT_SUFFIXES[@]}"; do
+        if [[ -n "$fmt" ]]; then
+            formats_list+="$fmt"$'\n'
+        fi
+    done
+
+    local formats
+    formats=$(fzf --multi \
+        --header="TAB=select formats" \
+        --height=30% \
+        --border \
+        --prompt="Select formats > " <<< "$formats_list") || { echo "Cancelled."; show_main_menu; return; }
+
+    while IFS= read -r base; do
+        while IFS= read -r fmt; do
+            local new_name="${base}${fmt}"
+            if [[ -e "$SCRIPT_DIR/$new_name" ]]; then
+                warn "Already exists: $new_name"
+            else
+                ln -s bible "$SCRIPT_DIR/$new_name"
+                success "Created: $new_name"
+            fi
+        done <<< "$formats"
+    done <<< "$selected"
+
+    echo ""
+    show_main_menu
+}
+
+# ============================================================================
+# OPTION VARIANTS
+# ============================================================================
+
+dedupe_option_string() {
+    local input="$1"
+    local output=""
+    local seen=""
+    local i
+
+    for ((i=0; i<${#input}; i++)); do
+        local c="${input:i:1}"
+        if [[ "$c" =~ [[:space:]] ]]; then
+            continue
+        fi
+        if [[ "$seen" != *"$c"* ]]; then
+            output+="$c"
+            seen+="$c"
+        fi
+    done
+
+    echo "$output"
+}
+
+intersect_option_strings() {
+    local a="$1"
+    local b="$2"
+    local out=""
+    local i
+
+    for ((i=0; i<${#a}; i++)); do
+        local c="${a:i:1}"
+        if [[ "$b" == *"$c"* && "$out" != *"$c"* ]]; then
+            out+="$c"
+        fi
+    done
+
+    echo "$out"
+}
+
+prompt_option_suffixes() {
+    local allowed="${1:-}"
+    local options_list=""
+    local entry
+
+    local entries=(
+        $'f\tFootnotes'
+        $'r\tCross references'
+        $'m\tMorphology'
+        $'n\tStrong\'s numbers'
+        $'l\tLemmas'
+        $'h\tSection headings'
+        $'c\tCantillation'
+        $'v\tHebrew vowels'
+        $'a\tGreek accents'
+        $'p\tArabic vowels'
+        $'b\tBi-directional reordering'
+        $'w\tRed words of Christ'
+        $'g\tGlosses/Ruby'
+        $'e\tWord enumerations'
+        $'i\tIntroductions'
+        $'x\tEncoded transliterations'
+        $'t\tICU transliterations'
+        $'M\tMorpheme segmentation'
+        $'custom\tCustom suffixes'
+    )
+
+    for entry in "${entries[@]}"; do
+        local key="${entry%%$'\t'*}"
+        if [[ "$key" == "custom" || -z "$allowed" || "$allowed" == *"$key"* ]]; then
+            options_list+="$entry"$'\n'
+        fi
+    done
+
+    local selected
+    selected=$(fzf --multi \
+        --header="TAB=select, ENTER=confirm" \
+        --height=60% \
+        --border \
+        --prompt="Select option suffixes > " <<< "$options_list") || { return 1; }
+
+    if [[ -z "$selected" ]]; then
+        return 1
+    fi
+
+    local selected_set=""
+    local custom_suffixes=()
+    while IFS= read -r line; do
+        local key="${line%%$'\t'*}"
+        if [[ "$key" == "custom" ]]; then
+            local custom=""
+            read -p "Custom suffixes (space-separated, e.g., fr rf): " custom < /dev/tty
+            if [[ -n "$custom" ]]; then
+                local item
+                for item in $custom; do
+                    custom_suffixes+=("$item")
+                done
+            fi
+        else
+            selected_set+="$key"
+        fi
+    done <<< "$selected"
+
+    local auto_suffix=""
+    local i
+    for ((i=0; i<${#OPTION_ORDER}; i++)); do
+        local c="${OPTION_ORDER:i:1}"
+        if [[ "$selected_set" == *"$c"* ]]; then
+            auto_suffix+="$c"
+        fi
+    done
+
+    if [[ -z "$auto_suffix" && ${#custom_suffixes[@]} -eq 0 ]]; then
+        return 1
+    fi
+
+    local seen=""
+    if [[ -n "$auto_suffix" ]]; then
+        printf "%s\n" "$auto_suffix"
+        seen+="|$auto_suffix|"
+    fi
+
+    local item
+    for item in "${custom_suffixes[@]}"; do
+        if [[ "$seen" != *"|$item|"* ]]; then
+            printf "%s\n" "$item"
+            seen+="|$item|"
+        fi
+    done
+}
+
+prompt_option_filters() {
+    local options_list
+    options_list=$'f\tFootnotes\nr\tCross references\nm\tMorphology\nn\tStrong\'s numbers\nl\tLemmas\nh\tSection headings\nc\tCantillation\nv\tHebrew vowels\na\tGreek accents\np\tArabic vowels\nb\tBi-directional reordering\nw\tRed words of Christ\ng\tGlosses/Ruby\ne\tWord enumerations\ni\tIntroductions\nx\tEncoded transliterations\nt\tICU transliterations\nM\tMorpheme segmentation\ncustom\tCustom option filters'
+
+    local selected
+    selected=$(fzf --multi \
+        --header="TAB=select, ENTER=confirm" \
+        --height=50% \
+        --border \
+        --prompt="Select option filters > " <<< "$options_list") || { return 1; }
+
+    if [[ -z "$selected" ]]; then
+        return 1
+    fi
+
+    local options=""
+    local custom_options=""
+    while IFS= read -r line; do
+        local key="${line%%$'\t'*}"
+        if [[ "$key" == "custom" ]]; then
+            local custom=""
+            read -p "Custom option filters (e.g., frcv): " custom < /dev/tty
+            custom_options+="$custom"
+        else
+            options+="$key"
+        fi
+    done <<< "$selected"
+
+    local ordered=""
+    local i
+    for ((i=0; i<${#OPTION_ORDER}; i++)); do
+        local c="${OPTION_ORDER:i:1}"
+        if [[ "$options" == *"$c"* ]]; then
+            ordered+="$c"
+        fi
+    done
+
+    local combined
+    combined="$(dedupe_option_string "$ordered$custom_options")"
+    echo "$combined"
+}
+
+add_option_variants() {
+    local existing
+    existing=$(get_existing_symlinks)
+
+    if [[ -z "$existing" ]]; then
+        warn "No existing symlinks found. Add module symlinks first."
+        show_main_menu
+        return
+    fi
+
+    echo ""
+    echo -e "${YELLOW}Select base symlinks to add option variants for:${NC}"
+    echo ""
+
+    local selected
+    selected=$(fzf --multi \
+        --header="TAB=select, ENTER=confirm" \
+        --height=50% \
+        --border \
+        --prompt="Select bases > " <<< "$existing") || { echo "Cancelled."; show_main_menu; return; }
+
+    if [[ -z "$selected" ]]; then
+        warn "No symlinks selected"
+        show_main_menu
+        return
+    fi
+
+    local suffixes
+    local allowed=""
+    local base
+    while IFS= read -r base; do
+        local base_no_format
+        local module=""
+        local supported=""
+
+        base_no_format=$(strip_format_suffix "$base")
+        module=$(resolve_module_from_symlink "$base_no_format") || true
+        if [[ -n "$module" ]]; then
+            supported=$(get_supported_option_filters "$module")
+        fi
+
+        if [[ -z "$supported" ]]; then
+            allowed=""
+            break
+        fi
+
+        if [[ -z "$allowed" ]]; then
+            allowed="$supported"
+        else
+            allowed=$(intersect_option_strings "$allowed" "$supported")
+        fi
+    done <<< "$selected"
+
+    suffixes=$(prompt_option_suffixes "$allowed") || { warn "No suffixes provided"; show_main_menu; return; }
+
+    while IFS= read -r base; do
+        local base_no_format
+        local module=""
+        local supported=""
+
+        base_no_format=$(strip_format_suffix "$base")
+        module=$(resolve_module_from_symlink "$base_no_format") || true
+        if [[ -n "$module" ]]; then
+            supported=$(get_supported_option_filters "$module")
+        fi
+
+        while IFS= read -r suffix; do
+            if [[ -n "$supported" && -n "$suffix" ]]; then
+                local i
+                local ok="1"
+                for ((i=0; i<${#suffix}; i++)); do
+                    local c="${suffix:i:1}"
+                    if [[ "$supported" != *"$c"* ]]; then
+                        warn "Skipping $base$suffix (option '$c' not supported by $module)"
+                        ok=""
+                        break
+                    fi
+                done
+                if [[ -z "$ok" ]]; then
+                    continue
+                fi
+            elif [[ -z "$supported" && -n "$module" ]]; then
+                warn "No option info for $module; creating $base$suffix without validation"
+            fi
+
+            local new_name="${base}-${suffix}"
+            if [[ -e "$SCRIPT_DIR/$new_name" ]]; then
+                warn "Already exists: $new_name"
+            else
+                ln -s bible "$SCRIPT_DIR/$new_name"
+                success "Created: $new_name"
+            fi
+        done <<< "$suffixes"
+    done <<< "$selected"
+
+    echo ""
+    show_main_menu
+}
+
+force_option_variants() {
+    local existing
+    existing=$(get_existing_symlinks)
+
+    if [[ -z "$existing" ]]; then
+        warn "No existing symlinks found. Add module symlinks first."
+        show_main_menu
+        return
+    fi
+
+    echo ""
+    echo -e "${YELLOW}Select symlinks to force option filters for:${NC}"
+    echo ""
+
+    local selected
+    selected=$(fzf --multi \
+        --header="TAB=select, ENTER=confirm" \
+        --height=50% \
+        --border \
+        --prompt="Select symlinks > " <<< "$existing") || { echo "Cancelled."; show_main_menu; return; }
+
+    if [[ -z "$selected" ]]; then
+        warn "No symlinks selected"
+        show_main_menu
+        return
+    fi
+
+    local options
+    options=$(prompt_option_filters) || { warn "No option filters selected"; show_main_menu; return; }
+
+    while IFS= read -r name; do
+        update_options_map "$name" "$options" || warn "Failed to update options for $name"
+    done <<< "$selected"
+
+    echo ""
+    show_main_menu
+}
+
+# ============================================================================
+# REMOVE SYMLINKS
+# ============================================================================
+
+remove_symlinks() {
+    local existing
+    existing=$(get_existing_symlinks)
+
+    if [[ -z "$existing" ]]; then
+        warn "No symlinks found to remove"
+        show_main_menu
+        return
+    fi
+
+    echo ""
+    echo -e "${YELLOW}Select symlinks to remove:${NC}"
+    echo ""
+
+    local selected
+    selected=$(fzf --multi \
+        --header="TAB=select, ENTER=confirm" \
+        --height=50% \
+        --border \
+        --prompt="Remove > " <<< "$existing") || { echo "Cancelled."; show_main_menu; return; }
+
+    if [[ -z "$selected" ]]; then
+        warn "No symlinks selected"
+        show_main_menu
+        return
+    fi
+
+    echo ""
+    read -p "Are you sure you want to remove these symlinks? [y/N]: " confirm < /dev/tty
+
+    if [[ "${confirm,,}" == "y" ]]; then
+        while IFS= read -r name; do
+            rm -f "$SCRIPT_DIR/$name"
+            success "Removed: $name"
+        done <<< "$selected"
+    else
+        echo "Cancelled."
+    fi
+
+    echo ""
+    show_main_menu
+}
+
+# ============================================================================
+# SHOW CURRENT SYMLINKS
+# ============================================================================
+
+show_current_symlinks() {
+    echo ""
+    echo -e "${BLUE}Current Bible symlinks:${NC}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+
+    local existing
+    existing=$(get_existing_symlinks)
+
+    if [[ -z "$existing" ]]; then
+        echo "  (none)"
+    else
+        while IFS= read -r name; do
+            # Detect options suffixes, then format
+            local base="$name"
+            local options=""
+            if [[ "$base" == *-* ]]; then
+                options="${base##*-}"
+                base="${base%-*}"
+            else
+                while [[ -n "$base" ]]; do
+                    local last="${base: -1}"
+                    case "$last" in
+                        f|r|m|n|l|h|c|v|a|p|b|w|g|e|i|x|t|M)
+                            options="$last$options"
+                            base="${base::-1}"
+                            ;;
+                        *)
+                            break
+                            ;;
+                    esac
+                done
+            fi
+
+            local format="plain"
+            if [[ "$base" =~ ^(.+)(html|tex|typs|typ|org|md)$ ]]; then
+                base="${BASH_REMATCH[1]}"
+                format="${BASH_REMATCH[2]}"
+            fi
+
+            if [[ "$format" == "typs" ]]; then
+                format="typ/simple"
+            elif [[ "$format" == "typ" ]]; then
+                format="typ/table"
+            fi
+
+            local forced=""
+            forced="$(get_options_map_for_name "$name")"
+            if [[ -z "$forced" ]]; then
+                forced="$(get_options_map_for_name "$base")"
+            fi
+
+            printf "  %-15s (base: %s, format: %s, options: %s, forced: %s)\n" \
+                "$name" "$base" "$format" "${options:-"-"}" "${forced:-"-"}"
+        done <<< "$existing"
+    fi
+
+    echo ""
+    read -p "Press ENTER to continue..." < /dev/tty
+    show_main_menu
+}
+
+# ============================================================================
+# CREATE SYMLINK
+# ============================================================================
+
+create_symlink() {
+    local name="$1"
+    local module="$2"
+    local target="$SCRIPT_DIR/$name"
+
+    if [[ -e "$target" ]]; then
+        if [[ -L "$target" ]]; then
+            warn "Symlink already exists: $name"
+        else
+            warn "File already exists (not a symlink): $name"
+            return
+        fi
+    else
+        ln -s bible "$target"
+        success "Created: $name -> bible (module: $module)"
+    fi
+
+    if ! update_module_map "$name" "$module"; then
+        warn "Mapping not updated for $name"
+        return 1
+    fi
+}
+
+# Update or insert mapping into MODULE_MAP inside bible script.
+update_module_map() {
+    local name="$1"
+    local module="$2"
+    local tmp
+
+    if ! grep -q "^declare -A MODULE_MAP=(" "$BIBLE_SCRIPT"; then
+        warn "MODULE_MAP not found in bible script; skipping update"
+        return 1
+    fi
+
+    tmp="$(mktemp)"
+    awk -v name="$name" -v module="$module" '
+        BEGIN { in_map=0; found=0 }
+        /^declare -A MODULE_MAP=\(/ { in_map=1; print; next }
+        in_map && /^\)/ {
+            if (!found) {
+                printf "    [%s]=\"%s\"\n", name, module
+            }
+            in_map=0
+            print
+            next
+        }
+        in_map && $0 ~ "^[[:space:]]*\\[" name "\\]=" {
+            printf "    [%s]=\"%s\"\n", name, module
+            found=1
+            next
+        }
+        { print }
+    ' "$BIBLE_SCRIPT" > "$tmp"
+
+    mv "$tmp" "$BIBLE_SCRIPT"
+    success "Updated MODULE_MAP: [$name]=\"$module\""
+}
+
+# Update or insert mapping into OPTIONS_MAP inside bible script.
+update_options_map() {
+    local name="$1"
+    local options="$2"
+    local tmp
+
+    if ! grep -q "^declare -A OPTIONS_MAP=(" "$BIBLE_SCRIPT"; then
+        warn "OPTIONS_MAP not found in bible script; skipping update"
+        return 1
+    fi
+
+    tmp="$(mktemp)"
+    awk -v name="$name" -v options="$options" '
+        BEGIN { in_map=0; found=0 }
+        /^declare -A OPTIONS_MAP=\(/ { in_map=1; print; next }
+        in_map && /^\)/ {
+            if (!found) {
+                printf "    [%s]=\"%s\"\n", name, options
+            }
+            in_map=0
+            print
+            next
+        }
+        in_map && $0 ~ "^[[:space:]]*\\[" name "\\]=" {
+            printf "    [%s]=\"%s\"\n", name, options
+            found=1
+            next
+        }
+        { print }
+    ' "$BIBLE_SCRIPT" > "$tmp"
+
+    mv "$tmp" "$BIBLE_SCRIPT"
+    success "Updated OPTIONS_MAP: [$name]=\"$options\""
+}
+
+get_options_map_for_name() {
+    local name="$1"
+
+    awk -v name="$name" '
+        BEGIN { in_map=0 }
+        /^declare -A OPTIONS_MAP=\(/ { in_map=1; next }
+        in_map && /^\)/ { exit }
+        in_map && $0 ~ "^[[:space:]]*\\[" name "\\]=" {
+            if (match($0, /\\[[^]]+\\]="([^"]+)"/, m)) {
+                print m[1]
+                exit
+            }
+        }
+    ' "$BIBLE_SCRIPT"
+}
+
+# ============================================================================
+# COMMAND LINE INTERFACE
+# ============================================================================
+
+show_help() {
+    cat << EOF
+Usage: $(basename "$0") [OPTIONS]
+
+Interactive symlink manager for Bible modules.
+
+OPTIONS:
+    -h, --help      Show this help
+    -l, --list      List current symlinks and exit
+    -a, --add       Quick add: create symlink (usage: -a NAME MODULE)
+
+EXAMPLES:
+    $(basename "$0")                    # Interactive mode
+    $(basename "$0") -l                 # List symlinks
+    $(basename "$0") -a lxx LXX         # Quick add LXX as 'lxx'
+
+EOF
+}
+
+# ============================================================================
+# MAIN
+# ============================================================================
+
+main() {
+    check_dependencies
+
+    # Parse arguments
+    case "${1:-}" in
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        -l|--list)
+            echo "Current symlinks:"
+            get_existing_symlinks | sed 's/^/  /'
+            exit 0
+            ;;
+        -a|--add)
+            if [[ -z "${2:-}" ]] || [[ -z "${3:-}" ]]; then
+                die "Usage: $0 -a NAME MODULE"
+            fi
+            create_symlink "$2" "$3"
+            exit 0
+            ;;
+        "")
+            # Interactive mode
+            show_main_menu
+            ;;
+        *)
+            die "Unknown option: $1. Use --help for usage."
+            ;;
+    esac
+}
+
+main "$@"

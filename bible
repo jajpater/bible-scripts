@@ -1,0 +1,661 @@
+#!/bin/bash
+
+# bible - Universal Bible lookup script
+# Usage: bible [OPTIONS] REFERENCE
+#   or via symlinks: hsv, svv, hsvtex, svvhtml, etc.
+#
+# This script determines the Bible module and output format based on the
+# name it was invoked with (via symlinks).
+
+set -euo pipefail
+
+# SCRIPT_DIR can be set by Nix wrapper, otherwise use script location
+readonly SCRIPT_DIR="${SCRIPT_DIR:-$(dirname "$(readlink -f "$0")")}"
+readonly SCRIPT_NAME="$(basename "$0")"
+readonly VERSION="1.0.0"
+readonly FORMATTER_SCRIPT_V2="$SCRIPT_DIR/bible-to-format_v2.py"
+FORMATTER_SCRIPT="$FORMATTER_SCRIPT_V2"
+
+# ============================================================================
+# MODULE MAPPING
+# Maps short script names to SWORD module names
+# ============================================================================
+declare -A MODULE_MAP=(
+    # Dutch versions
+    [hsv]="HSV"
+    [svv]="DutSVV"
+    [nbv]="NBV21"
+    [bgt]="BGT"
+    [gbs]="GBS2"
+
+    # English versions
+    [esv]="ESV"
+    [niv]="NIV"
+    [kjv]="KJV"
+    [asv]="ASV"
+    [nasb]="NASB"
+
+    # Original languages
+    [wlc]="WLC"
+    [na26]="NA26"
+    [lxx]="LXX"
+    [abpgrk]="ABPGRK"
+
+    # German
+    [luther]="GerLut1545"
+    [elb]="GerElb1905"
+
+    # French
+    [segond]="FreSegond"
+    [calvin]="CalvinCommentaries"
+    [kjva]="KJVA"
+    [wtm]="WTM"
+    [tsk]="TSK"
+)
+
+# Maps script names to diatheke option filters (override per symlink name)
+declare -A OPTIONS_MAP=(
+    # Example:
+    # [wlc]="cv"
+    [lxx]="a"
+)
+
+# ============================================================================
+# FORMAT DETECTION
+# Detects output format from script name suffix
+# ============================================================================
+detect_format_and_base() {
+    local name="$1"
+    local format="plain"
+    local base="$name"
+    local style=""
+
+    # Check for format suffixes (order matters - check longer suffixes first)
+    if [[ "$name" =~ ^(.+)html$ ]]; then
+        format="html"
+        base="${BASH_REMATCH[1]}"
+    elif [[ "$name" =~ ^(.+)tex$ ]]; then
+        format="tex"
+        base="${BASH_REMATCH[1]}"
+    elif [[ "$name" =~ ^(.+)typs$ ]]; then
+        format="typ"
+        style="simple"
+        base="${BASH_REMATCH[1]}"
+    elif [[ "$name" =~ ^(.+)typ$ ]]; then
+        format="typ"
+        base="${BASH_REMATCH[1]}"
+    elif [[ "$name" =~ ^(.+)org$ ]]; then
+        format="org"
+        base="${BASH_REMATCH[1]}"
+    elif [[ "$name" =~ ^(.+)md$ ]]; then
+        format="md"
+        base="${BASH_REMATCH[1]}"
+    fi
+
+    echo "$base $format $style"
+}
+
+# ============================================================================
+# OPTION DETECTION
+# Detects option suffix letters from script name
+# ============================================================================
+detect_options_and_base() {
+    local name="$1"
+    local base="$name"
+    local options=""
+
+    if [[ "$name" == *-* ]]; then
+        base="${name%-*}"
+        options="${name##*-}"
+        echo "$base $options"
+        return 0
+    fi
+
+    while [[ -n "$base" ]]; do
+        local last="${base: -1}"
+        case "$last" in
+            f|r|m|n|l|h|c|v|a|p|b|w|g|e|i|x|t|M)
+                options="$last$options"
+                base="${base::-1}"
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+
+    echo "$base $options"
+}
+
+parse_invocation_name() {
+    local name="$1"
+    local base=""
+    local format="plain"
+    local options=""
+
+    if [[ "$name" == *-* ]]; then
+        base="${name%-*}"
+        options="${name##*-}"
+        local parsed_fmt
+        parsed_fmt=$(detect_format_and_base "$base")
+        local fmt_base fmt_format fmt_style
+        read -r fmt_base fmt_format fmt_style <<< "$parsed_fmt"
+        base="$fmt_base"
+        format="$fmt_format"
+        style="$fmt_style"
+        echo "$base $format $options $style"
+        return 0
+    fi
+
+    local fmt
+    for fmt in html tex typs typ org md; do
+        if [[ "$name" == *"$fmt"* ]]; then
+            local suffix="${name##*$fmt}"
+            local prefix="${name%$fmt$suffix}"
+            if [[ "$prefix" != "$name" && "$suffix" =~ ^[frmnlhcvapbwgeixtM]*$ ]]; then
+                base="$prefix"
+                if [[ "$fmt" == "typs" ]]; then
+                    format="typ"
+                    style="simple"
+                else
+                    format="$fmt"
+                    style=""
+                fi
+                options="$suffix"
+                echo "$base $format $options $style"
+                return 0
+            fi
+        fi
+    done
+
+    local parsed_opts
+    local base_no_opts
+    local name_opts
+    local parsed_fmt
+
+    parsed_opts=$(detect_options_and_base "$name")
+    base_no_opts="${parsed_opts%% *}"
+    name_opts="${parsed_opts#* }"
+
+    parsed_fmt=$(detect_format_and_base "$base_no_opts")
+    read -r base format style <<< "$parsed_fmt"
+
+    echo "$base $format $name_opts $style"
+}
+
+dedupe_options() {
+    local input="$1"
+    local output=""
+    local seen=""
+    local i
+
+    for ((i=0; i<${#input}; i++)); do
+        local c="${input:i:1}"
+        if [[ "$c" =~ [[:space:]] ]]; then
+            continue
+        fi
+        if [[ "$seen" != *"$c"* ]]; then
+            output+="$c"
+            seen+="$c"
+        fi
+    done
+
+    echo "$output"
+}
+
+translate_option_filters() {
+    local input="$1"
+    local output=""
+    local i
+
+    for ((i=0; i<${#input}; i++)); do
+        local c="${input:i:1}"
+        case "$c" in
+            r) output+="s" ;; # use r as crossrefs shorthand
+            *) output+="$c" ;;
+        esac
+    done
+
+    echo "$output"
+}
+
+find_module_conf() {
+    local module="$1"
+    local paths=("$HOME/.sword/mods.d" "/usr/share/sword/mods.d")
+    local path
+
+    for path in "${paths[@]}"; do
+        if [[ -d "$path" ]]; then
+            local conf
+            conf=$(grep -rl --include='*.conf' "^\\[$module\\]\$" "$path" 2>/dev/null | grep -v 'modules-conf.cache' | head -1 || true)
+            if [[ -n "$conf" ]]; then
+                echo "$conf"
+                return 0
+            fi
+        fi
+    done
+
+    return 1
+}
+
+default_options_for_module() {
+    local module="$1"
+    local conf
+    local options=""
+
+    conf=$(find_module_conf "$module") || true
+    if [[ -z "$conf" ]]; then
+        echo ""
+        return 0
+    fi
+
+    local lang
+    lang=$(awk -F= '/^Lang=/{print tolower($2); exit}' "$conf" 2>/dev/null || true)
+
+    if [[ -n "$lang" && "$lang" =~ ^h ]]; then
+        options+="cv"
+    elif [[ -n "$lang" && "$lang" =~ ^gr ]]; then
+        options+="a"
+    fi
+
+    if grep -q '^GlobalOptionFilter=.*UTF8HebrewPoints' "$conf" 2>/dev/null; then
+        options+="v"
+    fi
+    if grep -q '^GlobalOptionFilter=.*UTF8Cantillation' "$conf" 2>/dev/null; then
+        options+="c"
+    fi
+    if grep -q '^GlobalOptionFilter=.*UTF8GreekAccents' "$conf" 2>/dev/null; then
+        options+="a"
+    fi
+
+    dedupe_options "$options"
+}
+
+# ============================================================================
+# MODULE RESOLUTION
+# Resolves the SWORD module name from the base script name
+# ============================================================================
+resolve_module() {
+    local base="$1"
+
+    # First check our mapping
+    if [[ -n "${MODULE_MAP[$base]:-}" ]]; then
+        echo "${MODULE_MAP[$base]}"
+        return 0
+    fi
+
+    local upper_base="${base^^}"
+
+    if find_module_conf "$base" >/dev/null 2>&1; then
+        echo "$base"
+        return 0
+    fi
+
+    if find_module_conf "$upper_base" >/dev/null 2>&1; then
+        echo "$upper_base"
+        return 0
+    fi
+
+    return 1
+}
+
+# ============================================================================
+# HELP AND VERSION
+# ============================================================================
+show_help() {
+    cat << EOF
+Usage: $SCRIPT_NAME [OPTIONS] REFERENCE
+
+Universal Bible lookup script. Can be invoked directly or via symlinks.
+
+INVOCATION METHODS:
+    bible -m HSV Johannes 3:16    # Direct invocation with module
+    hsv Johannes 3:16             # Via symlink (module from name)
+    hsvtex Johannes 3:16          # Via symlink (module + format from name)
+
+FORMAT SUFFIXES:
+    (none)  Plain text with verse formatting
+    html    HTML output
+    tex     LaTeX output (via pandoc)
+    typ     Typst output (table style)
+    typs    Typst output (simple style)
+    org     Org-mode output
+    md      Markdown output (via pandoc)
+
+OPTIONS:
+    -h, --help      Show this help message
+    -v, --version   Show version information
+    -m, --module    Specify Bible module explicitly
+    -f, --format    Specify output format explicitly
+    -o, --options   Specify module option filters (e.g., fr, m, cv)
+    -i, --inline-notes  Render notes inline for formatted outputs
+    --ref-pos       Reference position for formatted outputs (start/end/none)
+    --ref-type      Reference type for formatted outputs (inline/footnote/combined)
+    --verse-nums    Verse numbering style (dots/colons/none)
+    --book-style    Book name style (full/abbr)
+    --version-abbrev  Version tag style (auto/none)
+    --style         Formatter style (table/simple)
+    --raw           Show raw output without formatting
+    --list-modules  List available Bible modules
+
+EXAMPLES:
+    $SCRIPT_NAME -m HSV Johannes 3:16
+    hsv "1 Kor 13:4-7"
+    svvhtml Psalm 23
+    hsvtex Spreuken 3:5-6
+
+AVAILABLE MODULE SHORTCUTS:
+    Dutch:    hsv, svv, nbv, bgt, gbs
+    English:  esv, niv, kjv, asv, nasb
+    Original: wlc, na26, lxx, abpgrk
+    German:   luther, elb
+    French:   segond
+
+    Any installed SWORD module can also be used directly.
+EOF
+}
+
+show_version() {
+    echo "bible $VERSION"
+}
+
+list_modules() {
+    echo "Available Bible modules:"
+    diatheke -b system -k modulelist 2>/dev/null | head -100
+}
+
+# ============================================================================
+# OUTPUT FORMATTING
+# ============================================================================
+output_plain() {
+    local module="$1"
+    local options="$2"
+    shift 2
+    "$SCRIPT_DIR/bible-format-wrapper.py" -b "$module" ${options:+-o "$options"} "$@"
+}
+
+output_html() {
+    local module="$1"
+    local options="$2"
+    shift 2
+    "$SCRIPT_DIR/dutch-diatheke.py" -b "$module" -f HTML ${options:+-o "$options"} "$@"
+}
+
+output_tex() {
+    local module="$1"
+    local options="$2"
+    local inline_notes="$3"
+    shift 3
+    local out_format="HTML"
+    if [[ "$options" == *f* || "$options" == *s* ]]; then
+        out_format="OSIS"
+    fi
+    "$SCRIPT_DIR/dutch-diatheke.py" -b "$module" -f "$out_format" ${options:+-o "$options"} "$@" \
+        | "$FORMATTER_SCRIPT" --format tex ${options:+--options "$options"} ${inline_notes:+--inline-notes} "${FORMATTER_ARGS[@]}"
+}
+
+output_typ() {
+    local module="$1"
+    local options="$2"
+    local inline_notes="$3"
+    shift 3
+    local out_format="HTML"
+    if [[ "$options" == *f* || "$options" == *s* ]]; then
+        out_format="OSIS"
+    fi
+    "$SCRIPT_DIR/dutch-diatheke.py" -b "$module" -f "$out_format" ${options:+-o "$options"} "$@" \
+        | "$FORMATTER_SCRIPT" --format typ ${options:+--options "$options"} ${inline_notes:+--inline-notes} "${FORMATTER_ARGS[@]}"
+}
+
+output_md() {
+    local module="$1"
+    local options="$2"
+    local inline_notes="$3"
+    shift 3
+    local out_format="HTML"
+    if [[ "$options" == *f* || "$options" == *s* ]]; then
+        out_format="OSIS"
+    fi
+    "$SCRIPT_DIR/dutch-diatheke.py" -b "$module" -f "$out_format" ${options:+-o "$options"} "$@" \
+        | "$FORMATTER_SCRIPT" --format md ${options:+--options "$options"} ${inline_notes:+--inline-notes} "${FORMATTER_ARGS[@]}"
+}
+
+output_org() {
+    local module="$1"
+    local options="$2"
+    local inline_notes="$3"
+    shift 3
+    local out_format="HTML"
+    if [[ "$options" == *f* || "$options" == *s* ]]; then
+        out_format="OSIS"
+    fi
+    "$SCRIPT_DIR/dutch-diatheke.py" -b "$module" -f "$out_format" ${options:+-o "$options"} "$@" \
+        | "$FORMATTER_SCRIPT" --format org ${options:+--options "$options"} ${inline_notes:+--inline-notes} "${FORMATTER_ARGS[@]}"
+}
+
+output_raw() {
+    local module="$1"
+    local options="$2"
+    shift 2
+    "$SCRIPT_DIR/bible-format-wrapper.py" --raw -b "$module" ${options:+-o "$options"} "$@"
+}
+
+# ============================================================================
+# MAIN
+# ============================================================================
+main() {
+    local module=""
+    local format=""
+    local raw_output=""
+    local reference_parts=()
+    local option_filters=""
+    local cli_options=""
+    local inline_notes=""
+    local ref_pos=""
+    local ref_type=""
+    local verse_nums=""
+    local book_style=""
+    local version_abbrev=""
+    local style=""
+    FORMATTER_ARGS=()
+
+    # Detect format and base module from script name
+    local parsed
+    local base_name="$SCRIPT_NAME"
+    local detected_format="plain"
+
+    # If not invoked as "bible", try to resolve module from name
+    if [[ "$SCRIPT_NAME" != "bible" ]]; then
+        if [[ "$SCRIPT_NAME" != *-* ]]; then
+            module=$(resolve_module "$SCRIPT_NAME") || true
+        fi
+        if [[ -n "$module" ]]; then
+            base_name="$SCRIPT_NAME"
+            detected_format="plain"
+            option_filters=""
+        else
+            local parsed_base=""
+            local parsed_format=""
+            local parsed_opts=""
+            local parsed_style=""
+            read -r parsed_base parsed_format parsed_opts parsed_style <<< "$(parse_invocation_name "$SCRIPT_NAME")"
+            base_name="$parsed_base"
+            detected_format="$parsed_format"
+            option_filters="$parsed_opts"
+            if [[ -n "$parsed_style" ]]; then
+                style="$parsed_style"
+            fi
+
+            module=$(resolve_module "$base_name") || true
+        fi
+
+        format="$detected_format"
+    fi
+
+    # Parse command line arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            -v|--version)
+                show_version
+                exit 0
+                ;;
+            -m|--module)
+                module="$2"
+                shift 2
+                ;;
+            -f|--format)
+                format="$2"
+                shift 2
+                ;;
+            -i|--inline-notes)
+                inline_notes="1"
+                shift
+                ;;
+            -o|--options)
+                cli_options="$2"
+                shift 2
+                ;;
+            --ref-pos)
+                ref_pos="$2"
+                shift 2
+                ;;
+            --ref-type)
+                ref_type="$2"
+                shift 2
+                ;;
+            --verse-nums)
+                verse_nums="$2"
+                shift 2
+                ;;
+            --book-style)
+                book_style="$2"
+                shift 2
+                ;;
+            --version-abbrev)
+                version_abbrev="$2"
+                shift 2
+                ;;
+            --style)
+                style="$2"
+                shift 2
+                ;;
+            --raw)
+                raw_output="1"
+                shift
+                ;;
+            --list-modules)
+                list_modules
+                exit 0
+                ;;
+            -*)
+                echo "ERROR: Unknown option: $1" >&2
+                show_help >&2
+                exit 1
+                ;;
+            *)
+                reference_parts+=("$1")
+                shift
+                ;;
+        esac
+    done
+
+    # Validate module
+    if [[ -z "$module" ]]; then
+        echo "ERROR: No Bible module specified." >&2
+        echo "Use -m MODULE or invoke via a symlink (e.g., hsv, svv)" >&2
+        exit 1
+    fi
+
+    # Validate reference
+    if [[ ${#reference_parts[@]} -eq 0 ]]; then
+        echo "ERROR: Bible reference is required" >&2
+        show_help >&2
+        exit 1
+    fi
+
+    local reference="${reference_parts[*]}"
+
+    # Set default format if not specified
+    format="${format:-plain}"
+
+    if [[ -n "${OPTIONS_MAP[$SCRIPT_NAME]:-}" ]]; then
+        option_filters+="${OPTIONS_MAP[$SCRIPT_NAME]}"
+    elif [[ -n "$base_name" && -n "${OPTIONS_MAP[$base_name]:-}" ]]; then
+        option_filters+="${OPTIONS_MAP[$base_name]}"
+    fi
+
+    option_filters="$(dedupe_options "$option_filters")"
+
+    if [[ -z "$option_filters" ]]; then
+        option_filters="$(default_options_for_module "$module")"
+    fi
+
+    if [[ -n "$cli_options" ]]; then
+        option_filters="$(dedupe_options "$cli_options")"
+    fi
+
+    option_filters="$(translate_option_filters "$option_filters")"
+
+    if [[ -n "$ref_pos" ]]; then
+        FORMATTER_ARGS+=(--ref-pos "$ref_pos")
+    fi
+    if [[ -n "$ref_type" ]]; then
+        FORMATTER_ARGS+=(--ref-type "$ref_type")
+    fi
+    if [[ -n "$verse_nums" ]]; then
+        FORMATTER_ARGS+=(--verse-nums "$verse_nums")
+    fi
+    if [[ -n "$book_style" ]]; then
+        FORMATTER_ARGS+=(--book-style "$book_style")
+    fi
+    if [[ -n "$version_abbrev" ]]; then
+        FORMATTER_ARGS+=(--version-abbrev "$version_abbrev")
+    fi
+    if [[ -n "$style" ]]; then
+        FORMATTER_ARGS+=(--style "$style")
+    fi
+
+
+    # Check dependencies
+    if ! command -v diatheke >/dev/null 2>&1; then
+        echo "ERROR: diatheke is not installed or not in PATH" >&2
+        exit 1
+    fi
+
+    # Output based on format
+    if [[ -n "$raw_output" ]]; then
+        output_raw "$module" "$option_filters" "$reference"
+    else
+        case "$format" in
+            plain)
+                output_plain "$module" "$option_filters" "$reference"
+                ;;
+            html)
+                output_html "$module" "$option_filters" "$reference"
+                ;;
+            tex|latex)
+                output_tex "$module" "$option_filters" "$inline_notes" "$reference"
+                ;;
+            typ|typst)
+                output_typ "$module" "$option_filters" "$inline_notes" "$reference"
+                ;;
+            md|markdown)
+                output_md "$module" "$option_filters" "$inline_notes" "$reference"
+                ;;
+            org)
+                output_org "$module" "$option_filters" "$inline_notes" "$reference"
+                ;;
+            *)
+                echo "ERROR: Unknown format: $format" >&2
+                echo "Supported formats: plain, html, tex, typ, md, org" >&2
+                exit 1
+                ;;
+        esac
+    fi
+}
+
+main "$@"
