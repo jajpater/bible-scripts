@@ -16,7 +16,7 @@ TUI_VER="Diatheke-TUI v1.0"
 ## http://www.linuxjournal.com/article/6060
 
 ## User Configurations #############################################
-SWORD_DIR=$HOME/.sword # <-- Set SWORD directory here. (Or leave default)
+SWORD_DIR=${SWORD_DIR:-$HOME/.sword} # <-- Set SWORD directory here (or via env)
 MODULES_DIR=$SWORD_DIR/modules # Modules directory
 BIBLE_MOD="" # <-- Set your default bible module here, else we try to set one for you.
 DICT_MOD="" # <-- Set your default dictionary module here, else we try to set one for you.
@@ -47,7 +47,7 @@ function getModules() {
 	## Regex to get installed Generic Book modules
 	BOOKS=$(diatheke -b system -k modulelist | awk '/Generic/,EOF {if (!/Generic/) print $1 }')
 	## Find installed images/maps
-	IMAGES=$(find ~/.sword -name '*.jpg' -o -name '*.bmp' -o -name '*.png' -o -name '*.gif' | sed 's#.*/##')
+IMAGES=$(find "$SWORD_DIR" -name '*.jpg' -o -name '*.bmp' -o -name '*.png' -o -name '*.gif' | sed 's#.*/##')
 	## Regex to remove new lines: sed ':a;N;$!ba;s/\n/ /g'
 }
 ############
