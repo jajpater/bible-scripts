@@ -3,6 +3,7 @@ esv
 gbs
 gbsorg
 gbsorg-fr
+gbstyp
 hsv
 hsvhtml
 hsvmd
