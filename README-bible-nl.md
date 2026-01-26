@@ -321,4 +321,6 @@ hsvtex Johannes 3:16
 - `diatheke` - SWORD Bible lookup engine
 - `fzf` - Voor interactieve module selectie (bible-symlinks)
 - `pandoc` - Voor tex/md output conversie
+
+**Let op:** `diatheke-tui` wordt bewust **niet** meegeleverd in de flake-package.
 - Python 3 - Voor helper scripts

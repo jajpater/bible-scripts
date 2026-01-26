@@ -60,5 +60,14 @@
 
         default = self.packages.${system}.bible-scripts;
       };
+
+      devShells.${system}.default = pkgs.mkShell {
+        packages = with pkgs; [
+          python3
+          pandoc
+          fzf
+          sword
+        ];
+      };
     };
 }
