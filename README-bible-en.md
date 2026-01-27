@@ -8,6 +8,13 @@ This document describes the unified Bible lookup system and the
 There is one central `bible` script that is invoked via symlinks. The
 script name determines which module and which output format is used.
 
+## Dependencies (SWORD/Diatheke)
+
+This repo assumes you have a **patched SWORD** installation locally, with
+`diatheke` (and optionally `xiphos`) built against that patch set. For that
+reason, `diatheke` is **not** declared as a runtime dependency in the Nix
+derivation. Ensure `diatheke` is in your `PATH`.
+
 ```
 bible/
 ├── bible                 # Master script

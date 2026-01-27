@@ -7,10 +7,13 @@
 
   outputs = { self, nixpkgs }:
     let
-      system = "x86_64-linux";
-      pkgs = nixpkgs.legacyPackages.${system};
+      systems = [ "x86_64-linux" "aarch64-linux" ];
+      forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system);
     in {
-      packages.${system} = {
+      packages = forAllSystems (system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in {
         bible-scripts = pkgs.stdenv.mkDerivation {
           pname = "bible-scripts";
           version = "unstable";
@@ -67,27 +70,33 @@
               done < "$src/symlinks.txt"
             fi
 
-            # 3) Maak alle symlinks aan + schrijf lijst voor Emacs
+            # 3) Maak alle symlinks aan + schrijf lijst voor Emacs (gesorteerd)
             mkdir -p $out/share/bible-scripts
-            for link in "''${!SYMLINKS[@]}"; do
+            while IFS= read -r link; do
+              [[ -n "$link" ]] || continue
               ln -s $out/bin/bible "$out/bin/$link"
               echo "$link" >> $out/share/bible-scripts/commands.txt
-            done
+            done < <(printf '%s\n' "''${!SYMLINKS[@]}" | ${pkgs.coreutils}/bin/sort)
 
             runHook postInstall
           '';
         };
 
         default = self.packages.${system}.bible-scripts;
-      };
+      });
 
       # DevShell voor ontwikkeling (sword moet apart geïnstalleerd zijn)
-      devShells.${system}.default = pkgs.mkShell {
-        packages = with pkgs; [
-          python3
-          pandoc
-          fzf
-        ];
-      };
+      devShells = forAllSystems (system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in {
+          default = pkgs.mkShell {
+            packages = with pkgs; [
+              python3
+              pandoc
+              fzf
+            ];
+          };
+        });
     };
 }

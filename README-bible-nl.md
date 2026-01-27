@@ -8,6 +8,13 @@ format-converter `bible-to-format_v2.py`.
 Er is één centraal `bible` script dat via symlinks wordt aangeroepen. De
 scriptnaam bepaalt welke module en welk outputformaat wordt gebruikt.
 
+## Afhankelijkheden (SWORD/Diatheke)
+
+Deze repo gaat ervan uit dat je lokaal een **gepatchte SWORD**-installatie hebt,
+met `diatheke` (en eventueel `xiphos`) gebouwd tegen die patchset. Daarom wordt
+`diatheke` **niet** als runtime dependency in de Nix derivation opgenomen.
+Zorg dat `diatheke` in je `PATH` staat.
+
 ```
 bible/
 ├── bible                 # Master script
