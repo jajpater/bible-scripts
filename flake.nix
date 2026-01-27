@@ -9,14 +9,24 @@
     let
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
-      scriptsDir = ./.;
     in {
       packages.${system} = {
         bible-scripts = pkgs.stdenv.mkDerivation {
           pname = "bible-scripts";
           version = "unstable";
-          src = scriptsDir;
+          src = ./.;
           dontBuild = true;
+
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+
+          # Runtime dependencies - beschikbaar voor de scripts
+          propagatedBuildInputs = with pkgs; [
+            python3
+            pandoc
+            fzf
+            sword
+          ];
+
           installPhase = ''
             runHook preInstall
 
@@ -29,6 +39,16 @@
               $out/bin/
             patchShebangs $out/bin
             chmod +x $out/bin/bible $out/bin/bible-symlinks
+
+            # Wrap Python scripts zodat ze python3 en dependencies kunnen vinden
+            for script in bible-to-format_v2.py bible-format-wrapper.py dutch-diatheke.py; do
+              wrapProgram $out/bin/$script \
+                --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.python3 pkgs.pandoc pkgs.sword ]}
+            done
+
+            # Wrap bible script voor fzf en diatheke (sword)
+            wrapProgram $out/bin/bible \
+              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.fzf pkgs.sword ]}
 
             # Verzamel alle symlinks: uit symlinks.txt + uit repo (merge)
             declare -A SYMLINKS
