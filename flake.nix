@@ -9,14 +9,6 @@
     let
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
-
-      # SWORD met DutSVV versification patch
-      sword-patched = pkgs.sword.overrideAttrs (old: {
-        postPatch = (old.postPatch or "") + ''
-          echo "Applying DutSVV versification patch..."
-          patch -p0 < ${./dutsvv-versification.patch}
-        '';
-      });
     in {
       packages.${system} = {
         bible-scripts = pkgs.stdenv.mkDerivation {
@@ -27,12 +19,11 @@
 
           nativeBuildInputs = [ pkgs.makeWrapper ];
 
-          # Runtime dependencies - beschikbaar voor de scripts
-          propagatedBuildInputs = [
-            pkgs.python3
-            pkgs.pandoc
-            pkgs.fzf
-            sword-patched
+          # Runtime dependencies (sword moet apart geïnstalleerd zijn)
+          propagatedBuildInputs = with pkgs; [
+            python3
+            pandoc
+            fzf
           ];
 
           installPhase = ''
@@ -48,15 +39,16 @@
             patchShebangs $out/bin
             chmod +x $out/bin/bible $out/bin/bible-symlinks
 
-            # Wrap Python scripts zodat ze python3 en dependencies kunnen vinden
+            # Wrap Python scripts (diatheke moet in PATH staan via systeem)
             for script in bible-to-format_v2.py bible-format-wrapper.py dutch-diatheke.py; do
               wrapProgram $out/bin/$script \
-                --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.python3 pkgs.pandoc sword-patched ]}
+                --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.python3 pkgs.pandoc ]}
             done
 
-            # Wrap bible script voor fzf en diatheke (sword)
+            # Wrap bible script met --inherit-argv0 zodat symlink namen behouden blijven
             wrapProgram $out/bin/bible \
-              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.fzf sword-patched ]}
+              --inherit-argv0 \
+              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.fzf ]}
 
             # Verzamel alle symlinks: uit symlinks.txt + uit repo (merge)
             declare -A SYMLINKS
@@ -89,12 +81,12 @@
         default = self.packages.${system}.bible-scripts;
       };
 
+      # DevShell voor ontwikkeling (sword moet apart geïnstalleerd zijn)
       devShells.${system}.default = pkgs.mkShell {
-        packages = [
-          pkgs.python3
-          pkgs.pandoc
-          pkgs.fzf
-          sword-patched
+        packages = with pkgs; [
+          python3
+          pandoc
+          fzf
         ];
       };
     };

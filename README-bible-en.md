@@ -318,9 +318,53 @@ hsvtex John 3:16
 
 ### Dependencies
 
-- `diatheke` - SWORD Bible lookup engine
+- `diatheke` - SWORD Bible lookup engine (must be installed separately)
 - `fzf` - Interactive module selection (bible-symlinks)
 - `pandoc` - Tex/md output conversion
+- Python 3 - Helper scripts
 
 **Note:** `diatheke-tui` is intentionally **not** shipped in the flake package.
-- Python 3 - Helper scripts
+
+### Nix Flake
+
+This repo contains a `flake.nix` for installation via Nix.
+
+#### SWORD not included
+
+**Important:** The flake intentionally does not include SWORD as a dependency. This is because:
+
+1. Dutch Bible modules (GBS2, HSV, NBV21) require a patched SWORD with DutSVV versification
+2. We want to avoid having two SWORD versions (patched + unpatched) on the system
+3. The patched SWORD should be available system-wide (also for Xiphos)
+
+You must install SWORD (or sword-patched) separately before bible-scripts will work.
+
+#### Preserving symlink names
+
+The flake uses `wrapProgram` with `--inherit-argv0` to preserve symlink names. This ensures `hsv John 3:16` works correctly - the script sees `hsv` as the invocation name, not `bible`.
+
+#### Installation
+
+```bash
+# Standalone (requires diatheke in PATH)
+nix run github:jajpater/bible-scripts -- -m HSV "John 3:16"
+
+# Development shell
+nix develop github:jajpater/bible-scripts
+```
+
+#### DutSVV Versification Patch
+
+The repo contains `dutsvv-versification.patch` as documentation/backup. This patch adds support for the DutSVV versification system to SWORD. The patch is not used by the flake - you must patch SWORD yourself or use a pre-patched version.
+
+To build patched SWORD:
+
+```nix
+sword-patched = pkgs.sword.overrideAttrs (old: {
+  postPatch = (old.postPatch or "") + ''
+    patch -p0 < ${./dutsvv-versification.patch}
+  '';
+});
+```
+
+The patch has been submitted to the SWORD project. Once accepted upstream, the patch will no longer be needed.
