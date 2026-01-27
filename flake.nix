@@ -9,6 +9,14 @@
     let
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
+
+      # SWORD met DutSVV versification patch
+      sword-patched = pkgs.sword.overrideAttrs (old: {
+        postPatch = (old.postPatch or "") + ''
+          echo "Applying DutSVV versification patch..."
+          patch -p0 < ${./dutsvv-versification.patch}
+        '';
+      });
     in {
       packages.${system} = {
         bible-scripts = pkgs.stdenv.mkDerivation {
@@ -20,11 +28,11 @@
           nativeBuildInputs = [ pkgs.makeWrapper ];
 
           # Runtime dependencies - beschikbaar voor de scripts
-          propagatedBuildInputs = with pkgs; [
-            python3
-            pandoc
-            fzf
-            sword
+          propagatedBuildInputs = [
+            pkgs.python3
+            pkgs.pandoc
+            pkgs.fzf
+            sword-patched
           ];
 
           installPhase = ''
@@ -43,12 +51,12 @@
             # Wrap Python scripts zodat ze python3 en dependencies kunnen vinden
             for script in bible-to-format_v2.py bible-format-wrapper.py dutch-diatheke.py; do
               wrapProgram $out/bin/$script \
-                --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.python3 pkgs.pandoc pkgs.sword ]}
+                --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.python3 pkgs.pandoc sword-patched ]}
             done
 
             # Wrap bible script voor fzf en diatheke (sword)
             wrapProgram $out/bin/bible \
-              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.fzf pkgs.sword ]}
+              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.fzf sword-patched ]}
 
             # Verzamel alle symlinks: uit symlinks.txt + uit repo (merge)
             declare -A SYMLINKS
@@ -82,11 +90,11 @@
       };
 
       devShells.${system}.default = pkgs.mkShell {
-        packages = with pkgs; [
-          python3
-          pandoc
-          fzf
-          sword
+        packages = [
+          pkgs.python3
+          pkgs.pandoc
+          pkgs.fzf
+          sword-patched
         ];
       };
     };
