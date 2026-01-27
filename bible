@@ -37,7 +37,7 @@ declare -A MODULE_MAP=(
 
     # Original languages
     [wlc]="WLC"
-    [na26]="NA26"
+    [na26]="na26"
     [lxx]="LXX"
     [abpgrk]="ABPGRK"
 
@@ -52,6 +52,8 @@ declare -A MODULE_MAP=(
     [wtm]="WTM"
     [tsk]="TSK"
     [kant]="DutKant"
+    [mhc]="MHC"
+    [sva]="DutSVVA"
 )
 
 # Maps script names to diatheke option filters (override per symlink name)
