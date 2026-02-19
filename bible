@@ -95,7 +95,7 @@ detect_format_and_base() {
         base="${BASH_REMATCH[1]}"
     fi
 
-    echo "$base $format $style"
+    echo "$base|$format|$style"
 }
 
 # ============================================================================
@@ -142,11 +142,11 @@ parse_invocation_name() {
         local parsed_fmt
         parsed_fmt=$(detect_format_and_base "$base")
         local fmt_base fmt_format fmt_style
-        read -r fmt_base fmt_format fmt_style <<< "$parsed_fmt"
+        IFS='|' read -r fmt_base fmt_format fmt_style <<< "$parsed_fmt"
         base="$fmt_base"
         format="$fmt_format"
         style="$fmt_style"
-        echo "$base $format $options $style"
+        echo "$base|$format|$options|$style"
         return 0
     fi
 
@@ -165,7 +165,7 @@ parse_invocation_name() {
                     style=""
                 fi
                 options="$suffix"
-                echo "$base $format $options $style"
+                echo "$base|$format|$options|$style"
                 return 0
             fi
         fi
@@ -181,9 +181,9 @@ parse_invocation_name() {
     name_opts="${parsed_opts#* }"
 
     parsed_fmt=$(detect_format_and_base "$base_no_opts")
-    read -r base format style <<< "$parsed_fmt"
+    IFS='|' read -r base format style <<< "$parsed_fmt"
 
-    echo "$base $format $name_opts $style"
+    echo "$base|$format|$name_opts|$style"
 }
 
 dedupe_options() {
@@ -481,7 +481,7 @@ main() {
             local parsed_format=""
             local parsed_opts=""
             local parsed_style=""
-            read -r parsed_base parsed_format parsed_opts parsed_style <<< "$(parse_invocation_name "$SCRIPT_NAME")"
+            IFS='|' read -r parsed_base parsed_format parsed_opts parsed_style <<< "$(parse_invocation_name "$SCRIPT_NAME")"
             base_name="$parsed_base"
             detected_format="$parsed_format"
             option_filters="$parsed_opts"
