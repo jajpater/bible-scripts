@@ -43,6 +43,7 @@ DUTCH_BOOK_NAMES = {
     "Titus": "Titus", "Philemon": "Filemon", "Hebrews": "Hebreeën", "James": "Jakobus",
     "1Peter": "1 Petrus", "2Peter": "2 Petrus", "I Peter": "1 Petrus", "II Peter": "2 Petrus",
     "1John": "1 Johannes", "2John": "2 Johannes", "3John": "3 Johannes",
+    "I John": "1 Johannes", "II John": "2 Johannes", "III John": "3 Johannes",
     "Jude": "Judas", "Revelation": "Openbaring"
 }
 
@@ -67,6 +68,7 @@ DUTCH_BOOK_ABBREV = {
     "Titus": "Tit.", "Philemon": "Filem.", "Hebrews": "Hebr.", "James": "Jak.",
     "1Peter": "1 Petr.", "2Peter": "2 Petr.", "I Peter": "1 Petr.", "II Peter": "2 Petr.",
     "1John": "1 Joh.", "2John": "2 Joh.", "3John": "3 Joh.",
+    "I John": "1 Joh.", "II John": "2 Joh.", "III John": "3 Joh.",
     "Jude": "Judas", "Revelation": "Openb."
 }
 
@@ -96,6 +98,7 @@ ENGLISH_BOOK_ABBREV = {
     "Titus": "Titus", "Philemon": "Philem.", "Hebrews": "Heb.", "James": "Jas.",
     "1Peter": "1 Pet.", "2Peter": "2 Pet.", "I Peter": "1 Pet.", "II Peter": "2 Pet.",
     "1John": "1 John", "2John": "2 John", "3John": "3 John",
+    "I John": "1 John", "II John": "2 John", "III John": "3 John",
     "Jude": "Jude", "Revelation": "Rev."
 }
 
@@ -133,14 +136,15 @@ def extract_reference(html_content: str) -> Tuple[Optional[str], Optional[str], 
     module = module_match.group(1) if module_match else None
 
     # Extract book, chapter, verse from first verse reference
-    ref_match = re.search(r'([A-Za-z0-9]+)\s+(\d+):(\d+):', html_content)
+    # Book names can have Roman numeral or digit prefixes (e.g. "I John", "II Corinthians")
+    ref_match = re.search(r'((?:I{1,3}V?\s+)?[A-Za-z0-9]+)\s+(\d+):(\d+):', html_content)
     if ref_match:
         book = ref_match.group(1)
         chapter = ref_match.group(2)
         first_verse = ref_match.group(3)
 
         # Find all verses to determine range
-        all_verses = re.findall(r'[A-Za-z0-9]+\s+\d+:(\d+):', html_content)
+        all_verses = re.findall(r'(?:I{1,3}V?\s+)?[A-Za-z0-9]+\s+\d+:(\d+):', html_content)
         if all_verses:
             last_verse = all_verses[-1]
             if first_verse == last_verse:
@@ -235,7 +239,7 @@ def parse_html_verses(html_content: str, inline_notes: bool = False
     if not has_verse_html_tags:
         # Plain text format
         verse_blocks = re.findall(
-            r'([A-Za-z]+) (\d+):(\d+): (.+?)(?=\n(?:[A-Za-z]+ \d+:\d+:|\Z))',
+            r'((?:I{1,3}V?\s+)?[A-Za-z]+) (\d+):(\d+): (.+?)(?=\n(?:(?:I{1,3}V?\s+)?[A-Za-z]+ \d+:\d+:|\Z))',
             html_content, re.DOTALL | re.MULTILINE
         )
         for book, chapter, verse_number, verse_content in verse_blocks:
@@ -251,7 +255,7 @@ def parse_html_verses(html_content: str, inline_notes: bool = False
 
         # Extract verse blocks - match span with any attributes
         verse_blocks = re.findall(
-            r'([A-Za-z0-9]+) (\d+):(\d+): <span[^>]*>(.*?)</span><br\s*/>',
+            r'((?:I{1,3}V?\s+)?[A-Za-z0-9]+) (\d+):(\d+): <span[^>]*>(.*?)</span><br\s*/>',
             html_content, re.DOTALL
         )
 
