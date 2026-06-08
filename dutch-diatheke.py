@@ -105,7 +105,7 @@ CANONICAL_BOOKS = {
     "2 korinthe": "2Corinthians", "2 korintiers": "2Corinthians", "2corinthians": "2Corinthians", "2 corinthians": "2Corinthians", "2kor": "2Corinthians", "2 kor": "2Corinthians", "2 cor": "2Corinthians", "2cor": "2Corinthians", "ii korinthe": "2Corinthians", "ii kor": "2Corinthians", "2co": "2Corinthians",
     "galaten": "Galatians", "galatians": "Galatians", "gal": "Galatians", "ga": "Galatians", "glt": "Galatians",
     "efeze": "Ephesians", "efeziers": "Ephesians", "ephesians": "Ephesians", "ef": "Ephesians", "eph": "Ephesians", "ep": "Ephesians",
-    "filippenzen": "Philippians", "filipenzen": "Philippians", "philippians": "Philippians", "fil": "Philippians", "phil": "Philippians", "php": "Philippians", "pp": "Philippians",
+    "filippenzen": "Philippians", "filipenzen": "Philippians", "fillippenzen": "Philippians", "fillip": "Philippians", "philippians": "Philippians", "fil": "Philippians", "phil": "Philippians", "php": "Philippians", "pp": "Philippians",
     "kolossenzen": "Colossians", "colossenzen": "Colossians", "colossians": "Colossians", "kol": "Colossians", "col": "Colossians", "co": "Colossians",
     "1 thessalonicenzen": "1Thessalonians", "1 tessalonicenzen": "1Thessalonians", "1thessalonians": "1Thessalonians", "1 thessalonians": "1Thessalonians", "1thess": "1Thessalonians", "1 thess": "1Thessalonians", "1thes": "1Thessalonians", "1 thes": "1Thessalonians", "1 tes": "1Thessalonians", "1th": "1Thessalonians", "i thessalonicenzen": "1Thessalonians", "i thess": "1Thessalonians", "i tes": "1Thessalonians", "1ts": "1Thessalonians",
     "2 thessalonicenzen": "2Thessalonians", "2 tessalonicenzen": "2Thessalonians", "2thessalonians": "2Thessalonians", "2 thessalonians": "2Thessalonians", "2thess": "2Thessalonians", "2 thess": "2Thessalonians", "2thes": "2Thessalonians", "2 thes": "2Thessalonians", "2 tes": "2Thessalonians", "2th": "2Thessalonians", "ii thessalonicenzen": "2Thessalonians", "ii thess": "2Thessalonians", "ii tes": "2Thessalonians", "2ts": "2Thessalonians",
@@ -180,7 +180,18 @@ def build_book_mapping(include_apocrypha: bool = False) -> Dict[str, str]:
         # Add version without spaces
         no_space_key = norm_key.replace(' ', '')
         normalized_mapping[no_space_key] = english_value
-        
+
+    # Add unambiguous prefixes (e.g. "efe"/"efez" -> Ephesians) so abbreviated
+    # input resolves too.  Only prefixes that point to exactly one book are
+    # added, and existing keys are never overwritten.
+    prefix_books: Dict[str, set] = {}
+    for key, english in list(normalized_mapping.items()):
+        for length in range(3, len(key)):
+            prefix_books.setdefault(key[:length], set()).add(english)
+    for prefix, books in prefix_books.items():
+        if len(books) == 1 and prefix not in normalized_mapping:
+            normalized_mapping[prefix] = next(iter(books))
+
     return normalized_mapping
 
 def expand_reference_shorthand(reference: str, include_apocrypha: bool = False) -> List[str]:
