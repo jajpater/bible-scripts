@@ -45,6 +45,7 @@ import re
 import argparse
 import subprocess
 import unicodedata
+import difflib
 from typing import Dict, List, Tuple, Optional
 
 __version__ = "1.0.0"
@@ -194,6 +195,20 @@ def build_book_mapping(include_apocrypha: bool = False) -> Dict[str, str]:
 
     return normalized_mapping
 
+def fuzzy_book(token: str, mapping: Dict[str, str]) -> Optional[str]:
+    """Conservative fuzzy match: English book for a (mis)typed TOKEN, or None.
+
+    Last resort, only after exact/prefix matching has failed.  Resolves *only*
+    when the close matches all point to a single book, so it never makes an
+    ambiguous guess (it will not turn e.g. 'mat' into Markus).  Short tokens and
+    short keys are excluded to avoid noisy matches."""
+    if len(token) < 3:
+        return None
+    keys = [k for k in mapping if len(k) >= 3]
+    matches = difflib.get_close_matches(token, keys, n=5, cutoff=0.8)
+    books = {mapping[m] for m in matches}
+    return next(iter(books)) if len(books) == 1 else None
+
 def expand_reference_shorthand(reference: str, include_apocrypha: bool = False) -> List[str]:
     """
     Expand shorthand Bible reference syntax into individual references.
@@ -251,6 +266,20 @@ def expand_reference_shorthand(reference: str, include_apocrypha: bool = False) 
                     found_book = True
                     break
 
+            # Fuzzy fallback: herken een (mis)getypt boek (bv. "fillip") zodat de
+            # "no book context"-fout hieronder niet vóór de fuzzy-resolutie komt.
+            if not found_book:
+                for i in range(len(tokens), 0, -1):
+                    pb = " ".join(normalize_text(t) for t in tokens[:i])
+                    if fuzzy_book(pb.replace(" ", ""), mapping) or fuzzy_book(pb, mapping):
+                        result.append(comma_part)
+                        last_book = " ".join(tokens[:i])
+                        rest = " ".join(tokens[i:])
+                        if rest and ':' in rest:
+                            last_chapter = rest.split(':')[0].strip()
+                        found_book = True
+                        break
+
             if found_book:
                 continue
 
@@ -301,30 +330,39 @@ def parse_reference(reference: str, include_apocrypha: bool = False) -> str:
     if not tokens:
         raise ValueError("Invalid reference format")
 
-    # Try to find the longest matching book name
-    book_part = ""
+    # Try to find the longest matching book name (exact, dan zonder spaties).
+    english_book = None
     rest_part = ""
 
     for i in range(len(tokens), 0, -1):
         potential_book = " ".join(tokens[:i])
-        potential_rest = " ".join(tokens[i:])
-
-        # Check if this is a valid book name
         if potential_book in mapping:
-            book_part = potential_book
-            rest_part = potential_rest
+            english_book = mapping[potential_book]
+            rest_part = " ".join(tokens[i:])
             break
-        # Also check without spaces
-        potential_book_no_space = potential_book.replace(" ", "")
-        if potential_book_no_space in mapping:
-            book_part = potential_book_no_space
-            rest_part = potential_rest
+        no_space = potential_book.replace(" ", "")
+        if no_space in mapping:
+            english_book = mapping[no_space]
+            rest_part = " ".join(tokens[i:])
             break
 
-    if not book_part:
+    # Conservatieve fuzzy-fallback voor typo's (bv. "fillip" -> Philippians).
+    # Vuurt alleen als exacte/prefix-match faalde, en alleen bij een
+    # ondubbelzinnige match (nooit een gok); een gok wordt op stderr gemeld.
+    if english_book is None:
+        for i in range(len(tokens), 0, -1):
+            cand = " ".join(tokens[:i])
+            guess = (fuzzy_book(cand.replace(" ", ""), mapping)
+                     or fuzzy_book(cand, mapping))
+            if guess:
+                english_book = guess
+                rest_part = " ".join(tokens[i:])
+                print(f"Note: '{cand}' interpreted as {english_book}",
+                      file=sys.stderr)
+                break
+
+    if english_book is None:
         raise ValueError(f"Unknown Bible book: '{tokens[0] if tokens else reference}'")
-
-    english_book = mapping[book_part]
 
     if not rest_part:
         return english_book
