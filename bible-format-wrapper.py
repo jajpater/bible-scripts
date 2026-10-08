@@ -563,6 +563,10 @@ def main() -> int:
     cmd = [dutch_diatheke_path, '--dry-run', '-b', args.module, reference]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        # Notities/waarschuwingen van dutch-diatheke.py (bv. een fuzzy-interpretatie
+        # van een (mis)getypte boeknaam) doorgeven, zodat ze zichtbaar blijven.
+        if result.stderr:
+            sys.stderr.write(result.stderr)
         # Extract the diatheke command that would be run
         cmd_line = None
         for line in result.stdout.split('\n'):

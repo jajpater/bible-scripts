@@ -45,6 +45,7 @@ import re
 import argparse
 import subprocess
 import unicodedata
+import difflib
 from typing import Dict, List, Tuple, Optional
 
 __version__ = "1.0.0"
@@ -105,7 +106,7 @@ CANONICAL_BOOKS = {
     "2 korinthe": "2Corinthians", "2 korintiers": "2Corinthians", "2corinthians": "2Corinthians", "2 corinthians": "2Corinthians", "2kor": "2Corinthians", "2 kor": "2Corinthians", "2 cor": "2Corinthians", "2cor": "2Corinthians", "ii korinthe": "2Corinthians", "ii kor": "2Corinthians", "2co": "2Corinthians",
     "galaten": "Galatians", "galatians": "Galatians", "gal": "Galatians", "ga": "Galatians", "glt": "Galatians",
     "efeze": "Ephesians", "efeziers": "Ephesians", "ephesians": "Ephesians", "ef": "Ephesians", "eph": "Ephesians", "ep": "Ephesians",
-    "filippenzen": "Philippians", "filipenzen": "Philippians", "philippians": "Philippians", "fil": "Philippians", "phil": "Philippians", "php": "Philippians", "pp": "Philippians",
+    "filippenzen": "Philippians", "filipenzen": "Philippians", "fillippenzen": "Philippians", "fillip": "Philippians", "philippians": "Philippians", "fil": "Philippians", "phil": "Philippians", "php": "Philippians", "pp": "Philippians",
     "kolossenzen": "Colossians", "colossenzen": "Colossians", "colossians": "Colossians", "kol": "Colossians", "col": "Colossians", "co": "Colossians",
     "1 thessalonicenzen": "1Thessalonians", "1 tessalonicenzen": "1Thessalonians", "1thessalonians": "1Thessalonians", "1 thessalonians": "1Thessalonians", "1thess": "1Thessalonians", "1 thess": "1Thessalonians", "1thes": "1Thessalonians", "1 thes": "1Thessalonians", "1 tes": "1Thessalonians", "1th": "1Thessalonians", "i thessalonicenzen": "1Thessalonians", "i thess": "1Thessalonians", "i tes": "1Thessalonians", "1ts": "1Thessalonians",
     "2 thessalonicenzen": "2Thessalonians", "2 tessalonicenzen": "2Thessalonians", "2thessalonians": "2Thessalonians", "2 thessalonians": "2Thessalonians", "2thess": "2Thessalonians", "2 thess": "2Thessalonians", "2thes": "2Thessalonians", "2 thes": "2Thessalonians", "2 tes": "2Thessalonians", "2th": "2Thessalonians", "ii thessalonicenzen": "2Thessalonians", "ii thess": "2Thessalonians", "ii tes": "2Thessalonians", "2ts": "2Thessalonians",
@@ -180,8 +181,33 @@ def build_book_mapping(include_apocrypha: bool = False) -> Dict[str, str]:
         # Add version without spaces
         no_space_key = norm_key.replace(' ', '')
         normalized_mapping[no_space_key] = english_value
-        
+
+    # Add unambiguous prefixes (e.g. "efe"/"efez" -> Ephesians) so abbreviated
+    # input resolves too.  Only prefixes that point to exactly one book are
+    # added, and existing keys are never overwritten.
+    prefix_books: Dict[str, set] = {}
+    for key, english in list(normalized_mapping.items()):
+        for length in range(3, len(key)):
+            prefix_books.setdefault(key[:length], set()).add(english)
+    for prefix, books in prefix_books.items():
+        if len(books) == 1 and prefix not in normalized_mapping:
+            normalized_mapping[prefix] = next(iter(books))
+
     return normalized_mapping
+
+def fuzzy_book(token: str, mapping: Dict[str, str]) -> Optional[str]:
+    """Conservative fuzzy match: English book for a (mis)typed TOKEN, or None.
+
+    Last resort, only after exact/prefix matching has failed.  Resolves *only*
+    when the close matches all point to a single book, so it never makes an
+    ambiguous guess (it will not turn e.g. 'mat' into Markus).  Short tokens and
+    short keys are excluded to avoid noisy matches."""
+    if len(token) < 3:
+        return None
+    keys = [k for k in mapping if len(k) >= 3]
+    matches = difflib.get_close_matches(token, keys, n=5, cutoff=0.8)
+    books = {mapping[m] for m in matches}
+    return next(iter(books)) if len(books) == 1 else None
 
 def expand_reference_shorthand(reference: str, include_apocrypha: bool = False) -> List[str]:
     """
@@ -240,6 +266,20 @@ def expand_reference_shorthand(reference: str, include_apocrypha: bool = False) 
                     found_book = True
                     break
 
+            # Fuzzy fallback: herken een (mis)getypt boek (bv. "fillip") zodat de
+            # "no book context"-fout hieronder niet vóór de fuzzy-resolutie komt.
+            if not found_book:
+                for i in range(len(tokens), 0, -1):
+                    pb = " ".join(normalize_text(t) for t in tokens[:i])
+                    if fuzzy_book(pb.replace(" ", ""), mapping) or fuzzy_book(pb, mapping):
+                        result.append(comma_part)
+                        last_book = " ".join(tokens[:i])
+                        rest = " ".join(tokens[i:])
+                        if rest and ':' in rest:
+                            last_chapter = rest.split(':')[0].strip()
+                        found_book = True
+                        break
+
             if found_book:
                 continue
 
@@ -290,30 +330,39 @@ def parse_reference(reference: str, include_apocrypha: bool = False) -> str:
     if not tokens:
         raise ValueError("Invalid reference format")
 
-    # Try to find the longest matching book name
-    book_part = ""
+    # Try to find the longest matching book name (exact, dan zonder spaties).
+    english_book = None
     rest_part = ""
 
     for i in range(len(tokens), 0, -1):
         potential_book = " ".join(tokens[:i])
-        potential_rest = " ".join(tokens[i:])
-
-        # Check if this is a valid book name
         if potential_book in mapping:
-            book_part = potential_book
-            rest_part = potential_rest
+            english_book = mapping[potential_book]
+            rest_part = " ".join(tokens[i:])
             break
-        # Also check without spaces
-        potential_book_no_space = potential_book.replace(" ", "")
-        if potential_book_no_space in mapping:
-            book_part = potential_book_no_space
-            rest_part = potential_rest
+        no_space = potential_book.replace(" ", "")
+        if no_space in mapping:
+            english_book = mapping[no_space]
+            rest_part = " ".join(tokens[i:])
             break
 
-    if not book_part:
+    # Conservatieve fuzzy-fallback voor typo's (bv. "fillip" -> Philippians).
+    # Vuurt alleen als exacte/prefix-match faalde, en alleen bij een
+    # ondubbelzinnige match (nooit een gok); een gok wordt op stderr gemeld.
+    if english_book is None:
+        for i in range(len(tokens), 0, -1):
+            cand = " ".join(tokens[:i])
+            guess = (fuzzy_book(cand.replace(" ", ""), mapping)
+                     or fuzzy_book(cand, mapping))
+            if guess:
+                english_book = guess
+                rest_part = " ".join(tokens[i:])
+                print(f"Note: '{cand}' interpreted as {english_book}",
+                      file=sys.stderr)
+                break
+
+    if english_book is None:
         raise ValueError(f"Unknown Bible book: '{tokens[0] if tokens else reference}'")
-
-    english_book = mapping[book_part]
 
     if not rest_part:
         return english_book
