@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # bible - Universal Bible lookup script
 # Usage: bible [OPTIONS] REFERENCE
@@ -54,6 +54,7 @@ declare -A MODULE_MAP=(
     [kant]="DutKant"
     [mhc]="MHC"
     [sva]="DutSVVA"
+    [gnt]="SBLGNT"
 )
 
 # Maps script names to diatheke option filters (override per symlink name)

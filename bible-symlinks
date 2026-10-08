@@ -1,13 +1,12 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # bible-symlinks - Interactive symlink generator for Bible modules
 # Uses fzf for multi-select interface
 
 set -euo pipefail
 
-readonly SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-readonly BIBLE_SCRIPT="$SCRIPT_DIR/bible"
-trap 'chmod +x "$BIBLE_SCRIPT" 2>/dev/null || true' EXIT
+SCRIPT_DIR=""
+BIBLE_SCRIPT=""
 
 # Colors
 RED='\033[0;31m'
@@ -50,11 +49,27 @@ check_dependencies() {
         die "diatheke is required but not installed."
     fi
 
-    if [[ ! -e "$BIBLE_SCRIPT" ]]; then
-        die "bible script not found at: $BIBLE_SCRIPT"
+}
+
+configure_directory() {
+    local directory="$1"
+    if [[ -z "$directory" ]]; then
+        directory="$(dirname "$(readlink -f "$0")")"
+        # An installed Nix command manages a checkout in the current directory.
+        if [[ -f ./bible ]] && grep -q '^declare -A MODULE_MAP=(' ./bible; then
+            directory="$PWD"
+        fi
     fi
-    if [[ ! -x "$BIBLE_SCRIPT" ]]; then
-        chmod +x "$BIBLE_SCRIPT" 2>/dev/null || true
+    SCRIPT_DIR="$(cd -- "$directory" && pwd -P)" || die "Directory not found: $directory"
+    BIBLE_SCRIPT="$SCRIPT_DIR/bible"
+    [[ -f "$BIBLE_SCRIPT" ]] || die "bible script not found at: $BIBLE_SCRIPT"
+}
+
+check_editable_directory() {
+    if [[ ! -w "$SCRIPT_DIR" || ! -w "$BIBLE_SCRIPT" ]] ||
+        ! grep -q '^declare -A MODULE_MAP=(' "$BIBLE_SCRIPT"; then
+        die "Choose a writable bible-scripts checkout, not an installed Nix package.
+Run from the checkout or use: $0 --directory /path/to/bible-scripts"
     fi
 }
 
@@ -82,8 +97,14 @@ get_modules_by_section() {
 }
 
 get_existing_symlinks() {
-    # Get list of existing symlinks pointing to bible
-    find "$SCRIPT_DIR" -maxdepth 1 -type l -lname "bible" -printf "%f\n" 2>/dev/null | sort
+    # Resolve targets so both relative checkout links and Nix links are found.
+    local target link
+    target="$(readlink -f "$BIBLE_SCRIPT")"
+    while IFS= read -r -d '' link; do
+        if [[ "$(readlink -f "$link")" == "$target" ]]; then
+            basename "$link"
+        fi
+    done < <(find "$SCRIPT_DIR" -maxdepth 1 -type l -print0) | sort
 }
 
 strip_format_suffix() {
@@ -904,21 +925,26 @@ create_symlink() {
     local module="$2"
     local target="$SCRIPT_DIR/$name"
 
-    if [[ -e "$target" ]]; then
+    [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]] || die "Invalid symlink name: $name"
+    [[ "$module" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]] || die "Invalid module name: $module"
+
+    if [[ -e "$target" || -L "$target" ]]; then
         if [[ -L "$target" ]]; then
+            [[ "$(readlink -f "$target")" == "$(readlink -f "$BIBLE_SCRIPT")" ]] || die "Symlink points elsewhere: $name"
             warn "Symlink already exists: $name"
         else
             warn "File already exists (not a symlink): $name"
             return
         fi
-    else
-        ln -s bible "$target"
-        success "Created: $name -> bible (module: $module)"
     fi
 
     if ! update_module_map "$name" "$module"; then
         warn "Mapping not updated for $name"
         return 1
+    fi
+    if [[ ! -L "$target" ]]; then
+        ln -s bible "$target"
+        success "Created: $name -> bible (module: $module)"
     fi
 }
 
@@ -933,7 +959,7 @@ update_module_map() {
         return 1
     fi
 
-    tmp="$(mktemp)"
+    tmp="$(mktemp "$SCRIPT_DIR/.bible.XXXXXX")"
     awk -v name="$name" -v module="$module" '
         BEGIN { in_map=0; found=0 }
         /^declare -A MODULE_MAP=\(/ { in_map=1; print; next }
@@ -953,6 +979,7 @@ update_module_map() {
         { print }
     ' "$BIBLE_SCRIPT" > "$tmp"
 
+    chmod --reference="$BIBLE_SCRIPT" "$tmp"
     mv "$tmp" "$BIBLE_SCRIPT"
     success "Updated MODULE_MAP: [$name]=\"$module\""
 }
@@ -968,7 +995,7 @@ update_options_map() {
         return 1
     fi
 
-    tmp="$(mktemp)"
+    tmp="$(mktemp "$SCRIPT_DIR/.bible.XXXXXX")"
     awk -v name="$name" -v options="$options" '
         BEGIN { in_map=0; found=0 }
         /^declare -A OPTIONS_MAP=\(/ { in_map=1; print; next }
@@ -988,6 +1015,7 @@ update_options_map() {
         { print }
     ' "$BIBLE_SCRIPT" > "$tmp"
 
+    chmod --reference="$BIBLE_SCRIPT" "$tmp"
     mv "$tmp" "$BIBLE_SCRIPT"
     success "Updated OPTIONS_MAP: [$name]=\"$options\""
 }
@@ -1019,6 +1047,7 @@ Usage: $(basename "$0") [OPTIONS]
 Interactive symlink manager for Bible modules.
 
 OPTIONS:
+    -d, --directory DIR  Manage a writable bible-scripts checkout
     -h, --help      Show this help
     -l, --list      List current symlinks and exit
     -a, --add       Quick add: create symlink (usage: -a NAME MODULE)
@@ -1029,6 +1058,10 @@ EXAMPLES:
     $(basename "$0") -l                 # List symlinks
     $(basename "$0") -a lxx LXX         # Quick add LXX as 'lxx'
     $(basename "$0") -o symlinks.txt    # Export symlink list
+    $(basename "$0") -d ~/Develop/mygithub/bible-scripts
+
+When installed via Nix, run from a writable checkout or select it with -d.
+Changes affect the checkout; rebuild your Nix configuration to install them.
 
 EOF
 }
@@ -1038,7 +1071,17 @@ EOF
 # ============================================================================
 
 main() {
-    check_dependencies
+    local directory=""
+    while [[ "${1:-}" == "-d" || "${1:-}" == "--directory" ]]; do
+        [[ -n "${2:-}" ]] || die "Usage: $0 --directory DIR"
+        directory="$2"
+        shift 2
+    done
+    if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+        show_help
+        return
+    fi
+    configure_directory "$directory"
 
     # Parse arguments
     case "${1:-}" in
@@ -1055,6 +1098,7 @@ main() {
             if [[ -z "${2:-}" ]] || [[ -z "${3:-}" ]]; then
                 die "Usage: $0 -a NAME MODULE"
             fi
+            check_editable_directory
             create_symlink "$2" "$3"
             exit 0
             ;;
@@ -1068,6 +1112,8 @@ main() {
             ;;
         "")
             # Interactive mode
+            check_editable_directory
+            check_dependencies
             show_main_menu
             ;;
         *)
