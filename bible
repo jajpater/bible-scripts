@@ -54,6 +54,7 @@ declare -A MODULE_MAP=(
     [kant]="DutKant"
     [mhc]="MHC"
     [sva]="DutSVVA"
+    [stv]="STV"
 )
 
 # Maps script names to diatheke option filters (override per symlink name)
