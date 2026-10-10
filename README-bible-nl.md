@@ -234,6 +234,15 @@ Als een module note-markers levert (bijv. `n="53"`), gebruikt v2 die markers:
 ./bible-symlinks
 ```
 
+Voer dit uit vanuit een schrijfbare checkout van deze repository. De scripts
+vinden Bash via je `PATH`, ook op NixOS. De via Nix geïnstalleerde manager
+gebruikt automatisch de checkout in de huidige map. Je kunt die ook expliciet
+kiezen met `bible-symlinks --directory /pad/naar/bible-scripts`.
+
+Voor `svvtyp`: kies optie **3**, selecteer `svv` en daarna `typ`.
+Gebruik lokaal `./svvtyp "Joh 3:16"`. Bouw je Nix-configuratie opnieuw om de
+wijzigingen ook als geïnstalleerde commando's beschikbaar te maken.
+
 Dit opent een interactief menu waar je:
 1. Modules kunt selecteren uit alle geïnstalleerde SWORD-modules
 2. Format-varianten kunt toevoegen (html, tex, typ, typs, md, org)
