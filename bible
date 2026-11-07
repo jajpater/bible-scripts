@@ -54,6 +54,7 @@ declare -A MODULE_MAP=(
     [kant]="DutKant"
     [mhc]="MHC"
     [sva]="DutSVVA"
+    [stv]="STV"
     [gnt]="SBLGNT"
 )
 
